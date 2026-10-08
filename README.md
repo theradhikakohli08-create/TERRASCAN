@@ -11,11 +11,6 @@
 
 ### Turning Earth Observation into Environmental Intelligence
 
-### Turning Earth Observation into Environmental Intelligence
-
-
-### Turning Earth Observation into Environmental Intelligence
-
 **TerraScan** is a Google Earth Engine based environmental monitoring project designed to transform satellite data into meaningful insights about the Earth.
 
 By combining remote sensing, geospatial analysis, and data-driven visualization, TerraScan makes it easier to observe environmental patterns, identify changes, and understand what is happening across landscapes.
