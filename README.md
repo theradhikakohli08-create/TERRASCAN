@@ -8,6 +8,7 @@
 
                          E A R T H   O B S E R V A T I O N
 ```
+Live Demo https://theradhikakohli08.users.earthengine.app/view/terrascan
 
 ### Turning Earth Observation into Environmental Intelligence
 
