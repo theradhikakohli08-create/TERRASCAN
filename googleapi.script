@@ -1,0 +1,132 @@
+// TerraScan AI bridge (Google Apps Script): Gemini = audit summary, Claude = problem solver
+//
+// SETUP
+// 1. Project Settings > Script Properties, add:
+//      GEMINI_API_KEY     = key from aistudio.google.com/app/apikey
+//      ANTHROPIC_API_KEY  = key from console.anthropic.com (API billing is separate from a claude.ai plan)
+// 2. Deploy > Manage deployments > pencil > New version > Deploy  (URL stays the same)
+//
+// The web app is public ("Anyone"), so anyone with the URL can use your quota.
+// DAILY_LIMIT below caps total requests per day; also set a spend limit in the Anthropic console.
+
+var GEMINI_MODEL = 'gemini-3.8-flash';     // if Google retires a name, copy the current one from the error message
+var CLAUDE_MODEL = 'claude-sonnet-5-5';    // check current names at docs.claude.com
+var DAILY_LIMIT = 60;                      // total requests per day (Gemini + Claude)
+
+var SYS_SUMMARY =
+  'You are TerraScan, a climate and urban-planning advisor. You receive satellite-derived results ' +
+  '(Eco-Health Score, NDVI, NDWI, NDBI, land surface temperature, waterlogging, green deficit). ' +
+  'Write a short summary under 120 words in plain bullet points: what the numbers say and the single top priority. ' +
+  'State that figures are screening-level satellite estimates, not ground measurements.';
+
+var SYS_SOLVE =
+  'You are TerraScan\'s problem-solving advisor for city planners and students. You receive satellite-derived ' +
+  'results for a region plus the user\'s question. Answer the question directly with a prioritized, practical plan ' +
+  '(numbered steps, concrete actions, who should do what). Use the numbers given; do not invent new data. ' +
+  'Mention key assumptions and that figures are screening-level estimates. Keep it under 250 words.';
+
+function doGet(e) {
+  var p = (e && e.parameter) || {};
+  var q = p.q ? String(p.q).substring(0, 2500) : '';
+  var mode = (p.mode === 'solve') ? 'solve' : 'summary';
+  var title = (mode === 'solve') ? 'TerraScan AI: Claude problem solver' : 'TerraScan AI: Gemini summary';
+
+  if (!q) return page_(title, 'Please ask from the TerraScan dashboard.');
+  if (!underLimit_()) return page_(title, 'Daily request limit reached. Please try again tomorrow.');
+
+  var props = PropertiesService.getScriptProperties();
+  try {
+    var answer;
+    if (mode === 'solve') {
+      var ck = props.getProperty('ANTHROPIC_API_KEY');
+      if (!ck) return page_(title, 'ANTHROPIC_API_KEY is not set in Script Properties.');
+      answer = callClaude_(ck, SYS_SOLVE, q);
+    } else {
+      var gk = props.getProperty('GEMINI_API_KEY');
+      if (!gk) return page_(title, 'GEMINI_API_KEY is not set in Script Properties.');
+      answer = callGemini_(gk, SYS_SUMMARY, q);
+    }
+    return page_(title, answer, q);
+  } catch (err) {
+    return page_(title, String(err.message || err));
+  }
+}
+
+function callGemini_(key, system, user) {
+  var res = fetchWithRetry_(
+    'https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL + ':generateContent',
+    {method: 'post', contentType: 'application/json', headers: {'x-goog-api-key': key},
+     payload: JSON.stringify({
+       systemInstruction: {parts: [{text: system}]},
+       contents: [{parts: [{text: user}]}]
+     }), muteHttpExceptions: true});
+  var data = parse_(res);
+  if (res.getResponseCode() !== 200) {
+    throw new Error('Gemini error ' + res.getResponseCode() + ': ' + ((data.error && data.error.message) || ''));
+  }
+  var t = data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts[0].text;
+  if (!t) throw new Error('Gemini returned no answer.');
+  return t;
+}
+
+function callClaude_(key, system, user) {
+  var res = fetchWithRetry_(
+    'https://api.anthropic.com/v1/messages',
+    {method: 'post', contentType: 'application/json',
+     headers: {'x-api-key': key, 'anthropic-version': '2023-06-01'},
+     payload: JSON.stringify({
+       model: CLAUDE_MODEL,
+       max_tokens: 700,
+       system: system,
+       messages: [{role: 'user', content: user}]
+     }), muteHttpExceptions: true});
+  var data = parse_(res);
+  if (res.getResponseCode() !== 200) {
+    throw new Error('Claude error ' + res.getResponseCode() + ': ' + ((data.error && data.error.message) || ''));
+  }
+  var texts = [];
+  for (var i = 0; i < (data.content || []).length; i++) {
+    if (data.content[i].type === 'text') texts.push(data.content[i].text);
+  }
+  if (!texts.length) throw new Error('Claude returned no answer.');
+  return texts.join('\n');
+}
+
+// Retry on temporary overload / rate limit (429, 503, 529)
+function fetchWithRetry_(url, options) {
+  var res;
+  for (var attempt = 0; attempt < 4; attempt++) {
+    res = UrlFetchApp.fetch(url, options);
+    var c = res.getResponseCode();
+    if (c !== 429 && c !== 503 && c !== 529) break;
+    Utilities.sleep(2000 * (attempt + 1));
+  }
+  return res;
+}
+
+function parse_(res) {
+  try { return JSON.parse(res.getContentText()); } catch (err) { return {}; }
+}
+
+// Simple per-day request counter
+function underLimit_() {
+  var props = PropertiesService.getScriptProperties();
+  var k = 'cnt_' + Utilities.formatDate(new Date(), 'UTC', 'yyyyMMdd');
+  var n = parseInt(props.getProperty(k) || '0', 10);
+  if (n >= DAILY_LIMIT) return false;
+  props.setProperty(k, String(n + 1));
+  return true;
+}
+
+function esc_(t) {
+  return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+}
+
+function page_(title, answer, question) {
+  var html = '<div style="font-family:Arial,sans-serif;max-width:720px;margin:24px auto;padding:0 16px">' +
+    '<h2 style="color:#4a148c">' + esc_(title) + '</h2>' +
+    (question ? '<p style="color:#555;font-size:12px"><b>Input sent:</b> ' + esc_(question) + '</p>' : '') +
+    '<div style="background:#f3e8fd;border:1px solid #b388eb;border-radius:8px;padding:14px;line-height:1.55">' +
+    esc_(answer) + '</div></div>';
+  return HtmlService.createHtmlOutput(html).setTitle(title);
+}
